@@ -10,6 +10,14 @@ using SpinUp.Api.Validation;
 
 var builder = WebApplication.CreateBuilder(args);
 
+if (OperatingSystem.IsWindows())
+{
+    builder.Host.UseWindowsService(options =>
+    {
+        options.ServiceName = "SpinUp.Api";
+    });
+}
+
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddDbContext<SpinUpDbContext>(options =>
@@ -24,6 +32,8 @@ builder.Services.AddSingleton(sp =>
 builder.Services.AddSingleton<IServiceLogStore, InMemoryServiceLogStore>();
 builder.Services.AddSingleton<IEventStreamBroadcaster, EventStreamBroadcaster>();
 builder.Services.AddSingleton<IServiceRuntimeManager, ServiceRuntimeManager>();
+builder.Services.AddHostedService<ServiceHealthMonitor>();
+builder.Services.AddScoped<ServiceReadinessProbe>();
 
 var app = builder.Build();
 
@@ -34,6 +44,9 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI();
 }
+
+app.UseDefaultFiles();
+app.UseStaticFiles();
 
 await EnsureDatabaseAsync(app.Services);
 
@@ -204,21 +217,30 @@ app.MapGet("/api/stream", async (HttpContext context, IEventStreamBroadcaster br
 
     try
     {
-        var heartbeatTimer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+        var heartbeatInterval = TimeSpan.FromSeconds(15);
+        var nextHeartbeat = Task.Delay(heartbeatInterval, cancellationToken);
         while (!cancellationToken.IsCancellationRequested)
         {
-            while (channel.Reader.TryRead(out var evt))
+            var waitForEvent = channel.Reader.WaitToReadAsync(cancellationToken).AsTask();
+            var completed = await Task.WhenAny(waitForEvent, nextHeartbeat);
+
+            if (completed == waitForEvent && await waitForEvent)
             {
-                var payload = JsonSerializer.Serialize(evt);
-                await context.Response.WriteAsync($"event: {evt.Type}\n", cancellationToken);
-                await context.Response.WriteAsync($"data: {payload}\n\n", cancellationToken);
-                await context.Response.Body.FlushAsync(cancellationToken);
+                while (channel.Reader.TryRead(out var evt))
+                {
+                    var payload = JsonSerializer.Serialize(evt);
+                    await context.Response.WriteAsync($"event: {evt.Type}\n", cancellationToken);
+                    await context.Response.WriteAsync($"data: {payload}\n\n", cancellationToken);
+                    await context.Response.Body.FlushAsync(cancellationToken);
+                }
+
+                continue;
             }
 
-            await heartbeatTimer.WaitForNextTickAsync(cancellationToken);
             await context.Response.WriteAsync("event: heartbeat\n", cancellationToken);
             await context.Response.WriteAsync("data: {}\n\n", cancellationToken);
             await context.Response.Body.FlushAsync(cancellationToken);
+            nextHeartbeat = Task.Delay(heartbeatInterval, cancellationToken);
         }
     }
     catch (OperationCanceledException)
@@ -230,6 +252,42 @@ app.MapGet("/api/stream", async (HttpContext context, IEventStreamBroadcaster br
         broadcaster.Unsubscribe(subscriptionId);
     }
 });
+
+app.MapGet("/health/live", () =>
+{
+    return Results.Ok(new
+    {
+        status = "live",
+        utcNow = DateTimeOffset.UtcNow
+    });
+});
+
+app.MapGet("/health/ready", async (ServiceReadinessProbe readiness, CancellationToken cancellationToken) =>
+{
+    var result = await readiness.CheckReadinessAsync(cancellationToken);
+    if (result.IsReady)
+    {
+        return Results.Ok(new
+        {
+            status = "ready",
+            utcNow = DateTimeOffset.UtcNow
+        });
+    }
+
+    return Results.Json(new
+    {
+        status = "not_ready",
+        utcNow = DateTimeOffset.UtcNow,
+        issues = result.Issues
+    }, statusCode: StatusCodes.Status503ServiceUnavailable);
+});
+
+app.MapGet("/health/startup", (ServiceReadinessProbe readiness) =>
+{
+    return Results.Ok(readiness.BuildStartupDiagnostics());
+});
+
+app.MapFallbackToFile("index.html");
 
 app.Run();
 

@@ -109,8 +109,11 @@ public class ServiceRegistryApiTests : IClassFixture<ServiceRegistryApiTests.Cus
         var started = await startResponse.Content.ReadFromJsonAsync<RuntimeActionResponse>();
         Assert.NotNull(started);
         Assert.True(started!.Success);
-        Assert.Equal(RuntimeStatus.Up, started.Runtime.Status);
+        Assert.True(started.Runtime.Status is RuntimeStatus.Starting or RuntimeStatus.Up);
         Assert.NotNull(started.Runtime.Pid);
+
+        var ready = await WaitForRuntimeStatusAsync(service.Id, RuntimeStatus.Up, TimeSpan.FromSeconds(6));
+        Assert.Equal(RuntimeStatus.Up, ready.Status);
 
         var stopResponse = await _client.PostAsync($"/api/services/{service.Id}/stop", null);
         stopResponse.EnsureSuccessStatusCode();
@@ -189,6 +192,31 @@ public class ServiceRegistryApiTests : IClassFixture<ServiceRegistryApiTests.Cus
 
         var logs = await WaitForLogsAsync(service.Id, "spinup-log-line", TimeSpan.FromSeconds(5));
         Assert.Contains(logs.Logs, x => x.Stream == "stdout" && x.Message.Contains("spinup-log-line", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Health_Live_Returns_Ok()
+    {
+        var response = await _client.GetAsync("/health/live");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Health_Ready_Returns_Ok()
+    {
+        var response = await _client.GetAsync("/health/ready");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Health_Startup_Returns_Diagnostics_Payload()
+    {
+        var response = await _client.GetAsync("/health/startup");
+        response.EnsureSuccessStatusCode();
+
+        var payload = await response.Content.ReadAsStringAsync();
+        Assert.Contains("environment", payload, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("storageRoot", payload, StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<ServiceResponse> CreateServiceAsync(string name, string command, string args)

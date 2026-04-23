@@ -9,6 +9,7 @@ public interface IServiceRuntimeManager
     Task<RuntimeActionResponse> RestartAsync(Guid serviceId, CancellationToken cancellationToken = default);
     Task<BulkRuntimeActionResponse> StartAllAsync(CancellationToken cancellationToken = default);
     Task<BulkRuntimeActionResponse> StopAllAsync(CancellationToken cancellationToken = default);
+    Task CheckHealthAsync(CancellationToken cancellationToken = default);
     ServiceRuntimeResponse GetRuntime(Guid serviceId);
     IReadOnlyList<ServiceRuntimeResponse> GetAllRuntime();
 }

@@ -9,7 +9,16 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.25" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.13" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('..\..\web\spinup-ui\dist')">
+    <Content Include="..\..\web\spinup-ui\dist\**\*">
+      <Link>wwwroot\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

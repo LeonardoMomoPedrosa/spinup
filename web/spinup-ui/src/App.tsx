@@ -16,7 +16,7 @@ type RuntimeStatus = 'Down' | 'Starting' | 'Up' | 'Stopping' | 'Error'
 
 type ServiceRuntime = {
   serviceId: string
-  status: RuntimeStatus
+  status: RuntimeStatus | number
   pid?: number | null
   startedAt?: string | null
   lastExitCode?: number | null
@@ -47,22 +47,35 @@ type ServiceLogListResponse = {
   logs: ServiceLogEntry[]
 }
 
-type StreamEvent<TPayload = unknown> = {
-  type: 'log' | 'runtime'
-  timestamp: string
-  serviceId: string
-  payload: TPayload
-}
-
 type FormState = {
   id?: string
   name: string
   path: string
   command: string
   args: string
+  env: Record<string, string>
+  healthCheckUrl: string
 }
 
-const defaultForm: FormState = { name: '', path: '', command: '', args: '' }
+const healthCheckUrlEnvKey = 'SPINUP_HEALTHCHECK_URL'
+const defaultForm: FormState = { name: '', path: '', command: '', args: '', env: {}, healthCheckUrl: '' }
+const runtimeStatusByValue: RuntimeStatus[] = ['Down', 'Starting', 'Up', 'Stopping', 'Error']
+
+function normalizeRuntimeStatus(status: RuntimeStatus | number | null | undefined): RuntimeStatus {
+  if (typeof status === 'string') {
+    return runtimeStatusByValue.includes(status as RuntimeStatus) ? (status as RuntimeStatus) : 'Down'
+  }
+
+  if (typeof status === 'number') {
+    return runtimeStatusByValue[status] ?? 'Down'
+  }
+
+  return 'Down'
+}
+
+function getProp<T>(value: Record<string, unknown>, camelKey: string, pascalKey: string): T | undefined {
+  return (value[camelKey] ?? value[pascalKey]) as T | undefined
+}
 
 async function apiFetch<T>(input: string, init?: RequestInit): Promise<T> {
   const response = await fetch(input, {
@@ -101,6 +114,7 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [autoScroll, setAutoScroll] = useState(true)
+  const [openCardMenuId, setOpenCardMenuId] = useState<string | null>(null)
   const logsRef = useRef<HTMLDivElement | null>(null)
 
   const selectedService = useMemo(
@@ -159,31 +173,50 @@ function App() {
     const eventSource = new EventSource('/api/stream')
 
     eventSource.addEventListener('runtime', (event) => {
-      const data = JSON.parse((event as MessageEvent).data) as StreamEvent<{
-        status: RuntimeStatus
-        message?: string | null
-        exitCode?: number | null
-      }>
+      const raw = JSON.parse((event as MessageEvent).data) as Record<string, unknown>
+      const serviceId = getProp<string>(raw, 'serviceId', 'ServiceId')
+      const payload = getProp<Record<string, unknown>>(raw, 'payload', 'Payload')
+      if (!serviceId || !payload) {
+        return
+      }
+
+      const status = normalizeRuntimeStatus(getProp<RuntimeStatus | number>(payload, 'status', 'Status'))
+      const message = getProp<string | null>(payload, 'message', 'Message') ?? null
+      const exitCode = getProp<number | null>(payload, 'exitCode', 'ExitCode') ?? null
 
       setRuntimeMap((current) => {
-        const existing = current[data.serviceId]
+        const existing = current[serviceId]
         return {
           ...current,
-          [data.serviceId]: {
-            serviceId: data.serviceId,
-            status: data.payload.status,
+          [serviceId]: {
+            serviceId,
+            status,
             pid: existing?.pid ?? null,
             startedAt: existing?.startedAt ?? null,
-            lastExitCode: data.payload.exitCode ?? existing?.lastExitCode ?? null,
-            lastError: data.payload.message ?? existing?.lastError ?? null,
+            lastExitCode: exitCode ?? existing?.lastExitCode ?? null,
+            lastError: message ?? existing?.lastError ?? null,
           },
         }
       })
     })
 
     eventSource.addEventListener('log', (event) => {
-      const data = JSON.parse((event as MessageEvent).data) as StreamEvent<ServiceLogEntry>
-      const logEntry = data.payload
+      const raw = JSON.parse((event as MessageEvent).data) as Record<string, unknown>
+      const payload = getProp<Record<string, unknown>>(raw, 'payload', 'Payload')
+      if (!payload) {
+        return
+      }
+
+      const serviceId = getProp<string>(payload, 'serviceId', 'ServiceId')
+      const sequence = getProp<number>(payload, 'sequence', 'Sequence')
+      const timestamp = getProp<string>(payload, 'timestamp', 'Timestamp')
+      const stream = getProp<string>(payload, 'stream', 'Stream')
+      const message = getProp<string>(payload, 'message', 'Message')
+      if (!serviceId || sequence === undefined || !timestamp || !stream || message === undefined) {
+        return
+      }
+
+      const logEntry: ServiceLogEntry = { serviceId, sequence, timestamp, stream, message }
       setLogsByService((current) => {
         const existing = current[logEntry.serviceId] ?? []
         if (existing.some((item) => item.sequence === logEntry.sequence)) {
@@ -289,6 +322,8 @@ function App() {
       path: item.path,
       command: item.command,
       args: item.args ?? '',
+      env: item.env ?? {},
+      healthCheckUrl: item.env?.[healthCheckUrlEnvKey] ?? '',
     })
     setShowForm(true)
   }
@@ -303,7 +338,15 @@ function App() {
         path: form.path,
         command: form.command,
         args: form.args || null,
-        env: {},
+        env: (() => {
+          const nextEnv = { ...form.env }
+          if (form.healthCheckUrl.trim()) {
+            nextEnv[healthCheckUrlEnvKey] = form.healthCheckUrl.trim()
+          } else {
+            delete nextEnv[healthCheckUrlEnvKey]
+          }
+          return nextEnv
+        })(),
       }
 
       if (form.id) {
@@ -346,6 +389,15 @@ function App() {
     }
   }
 
+  function clearSelectedLogs() {
+    if (!selectedServiceId) {
+      return
+    }
+
+    setLogsByService((current) => ({ ...current, [selectedServiceId]: [] }))
+    setNotice('Console cleared')
+  }
+
   return (
     <div className="page">
       <header className="header">
@@ -369,7 +421,7 @@ function App() {
           <div className="service-list">
             {services.map((service) => {
               const runtime = runtimeMap[service.id]
-              const status = runtime?.status ?? 'Down'
+              const status = normalizeRuntimeStatus(runtime?.status)
               return (
                 <article
                   key={service.id}
@@ -393,13 +445,30 @@ function App() {
                     <button onClick={(e) => handleCardAction(e, () => void runLifecycle(service.id, 'start'))}>Start</button>
                     <button onClick={(e) => handleCardAction(e, () => void runLifecycle(service.id, 'stop'))}>Stop</button>
                     <button onClick={(e) => handleCardAction(e, () => void runLifecycle(service.id, 'restart'))}>Restart</button>
-                    <button onClick={(e) => handleCardAction(e, () => openEditForm(service))}>Edit</button>
-                    <button
-                      className="danger"
-                      onClick={(e) => handleCardAction(e, () => void removeService(service))}
-                    >
-                      Delete
-                    </button>
+                    <div className="more-actions">
+                      <button
+                        className="icon-button"
+                        aria-label={`More actions for ${service.name}`}
+                        onClick={(e) =>
+                          handleCardAction(e, () =>
+                            setOpenCardMenuId((current) => (current === service.id ? null : service.id)),
+                          )
+                        }
+                      >
+                        ...
+                      </button>
+                      {openCardMenuId === service.id ? (
+                        <div className="more-actions-menu">
+                          <button onClick={(e) => handleCardAction(e, () => openEditForm(service))}>Edit</button>
+                          <button
+                            className="danger"
+                            onClick={(e) => handleCardAction(e, () => void removeService(service))}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                   {runtime?.lastError ? <p className="error-text">{runtime.lastError}</p> : null}
                 </article>
@@ -411,10 +480,15 @@ function App() {
         <section className="logs">
           <div className="logs-header">
             <h2>Logs {selectedService ? `- ${selectedService.name}` : ''}</h2>
-            <label>
-              <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} />
-              Auto-scroll
-            </label>
+            <div className="logs-controls">
+              <button type="button" onClick={clearSelectedLogs} disabled={selectedServiceId === null}>
+                Clear Console
+              </button>
+              <label>
+                <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} />
+                Auto-scroll
+              </label>
+            </div>
           </div>
           <div className="log-window" ref={logsRef}>
             {selectedServiceId === null ? <p>Select a service to view logs.</p> : null}
@@ -460,6 +534,14 @@ function App() {
               <label>
                 Args
                 <input value={form.args} onChange={(e) => setForm((current) => ({ ...current, args: e.target.value }))} />
+              </label>
+              <label>
+                Health Check URL
+                <input
+                  value={form.healthCheckUrl}
+                  placeholder="http://localhost:5000/health"
+                  onChange={(e) => setForm((current) => ({ ...current, healthCheckUrl: e.target.value }))}
+                />
               </label>
               <div className="actions">
                 <button type="submit" disabled={isSaving}>
