@@ -55,10 +55,20 @@ type FormState = {
   args: string
   env: Record<string, string>
   healthCheckUrl: string
+  startupTimeoutSeconds: string
 }
 
 const healthCheckUrlEnvKey = 'SPINUP_HEALTHCHECK_URL'
-const defaultForm: FormState = { name: '', path: '', command: '', args: '', env: {}, healthCheckUrl: '' }
+const startupTimeoutEnvKey = 'SPINUP_STARTUP_TIMEOUT_SECONDS'
+const defaultForm: FormState = {
+  name: '',
+  path: '',
+  command: '',
+  args: '',
+  env: {},
+  healthCheckUrl: '',
+  startupTimeoutSeconds: '',
+}
 const runtimeStatusByValue: RuntimeStatus[] = ['Down', 'Starting', 'Up', 'Stopping', 'Error']
 
 function normalizeRuntimeStatus(status: RuntimeStatus | number | null | undefined): RuntimeStatus {
@@ -115,6 +125,8 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null)
   const [autoScroll, setAutoScroll] = useState(true)
   const [openCardMenuId, setOpenCardMenuId] = useState<string | null>(null)
+  const [newEnvKey, setNewEnvKey] = useState('')
+  const [newEnvValue, setNewEnvValue] = useState('')
   const logsRef = useRef<HTMLDivElement | null>(null)
 
   const selectedService = useMemo(
@@ -243,6 +255,15 @@ function App() {
     logsRef.current.scrollTop = logsRef.current.scrollHeight
   }, [selectedLogs, autoScroll])
 
+  useEffect(() => {
+    if (!notice) {
+      return
+    }
+
+    const timer = window.setTimeout(() => setNotice(null), 2500)
+    return () => window.clearTimeout(timer)
+  }, [notice])
+
   async function loadAll() {
     setIsLoading(true)
     setError(null)
@@ -312,6 +333,8 @@ function App() {
 
   function openCreateForm() {
     setForm(defaultForm)
+    setNewEnvKey('')
+    setNewEnvValue('')
     setShowForm(true)
   }
 
@@ -324,8 +347,43 @@ function App() {
       args: item.args ?? '',
       env: item.env ?? {},
       healthCheckUrl: item.env?.[healthCheckUrlEnvKey] ?? '',
+      startupTimeoutSeconds: item.env?.[startupTimeoutEnvKey] ?? '',
     })
+    setNewEnvKey('')
+    setNewEnvValue('')
     setShowForm(true)
+  }
+
+  function addEnvVar() {
+    const key = newEnvKey.trim()
+    if (!key) {
+      setError('Environment variable key is required.')
+      return
+    }
+
+    if (key === healthCheckUrlEnvKey) {
+      setForm((current) => ({ ...current, healthCheckUrl: newEnvValue.trim() }))
+    } else {
+      setForm((current) => ({
+        ...current,
+        env: {
+          ...current.env,
+          [key]: newEnvValue,
+        },
+      }))
+    }
+
+    setError(null)
+    setNewEnvKey('')
+    setNewEnvValue('')
+  }
+
+  function removeEnvVar(key: string) {
+    setForm((current) => {
+      const nextEnv = { ...current.env }
+      delete nextEnv[key]
+      return { ...current, env: nextEnv }
+    })
   }
 
   async function saveForm(event: FormEvent<HTMLFormElement>) {
@@ -345,6 +403,13 @@ function App() {
           } else {
             delete nextEnv[healthCheckUrlEnvKey]
           }
+
+          if (form.startupTimeoutSeconds.trim()) {
+            nextEnv[startupTimeoutEnvKey] = form.startupTimeoutSeconds.trim()
+          } else {
+            delete nextEnv[startupTimeoutEnvKey]
+          }
+
           return nextEnv
         })(),
       }
@@ -393,9 +458,17 @@ function App() {
     if (!selectedServiceId) {
       return
     }
-
-    setLogsByService((current) => ({ ...current, [selectedServiceId]: [] }))
-    setNotice('Console cleared')
+    const serviceId = selectedServiceId
+    setError(null)
+    void (async () => {
+      try {
+        await apiFetch<void>(`/api/services/${serviceId}/logs`, { method: 'DELETE' })
+        setLogsByService((current) => ({ ...current, [serviceId]: [] }))
+        setNotice('Console cleared')
+      } catch (clearError) {
+        setError((clearError as Error).message)
+      }
+    })()
   }
 
   return (
@@ -411,7 +484,6 @@ function App() {
       </header>
 
       {error ? <div className="banner error">{error}</div> : null}
-      {notice ? <div className="banner notice">{notice}</div> : null}
 
       <main className="layout">
         <section className="services">
@@ -459,10 +531,24 @@ function App() {
                       </button>
                       {openCardMenuId === service.id ? (
                         <div className="more-actions-menu">
-                          <button onClick={(e) => handleCardAction(e, () => openEditForm(service))}>Edit</button>
+                          <button
+                            onClick={(e) =>
+                              handleCardAction(e, () => {
+                                setOpenCardMenuId(null)
+                                openEditForm(service)
+                              })
+                            }
+                          >
+                            Edit
+                          </button>
                           <button
                             className="danger"
-                            onClick={(e) => handleCardAction(e, () => void removeService(service))}
+                            onClick={(e) =>
+                              handleCardAction(e, () => {
+                                setOpenCardMenuId(null)
+                                void removeService(service)
+                              })
+                            }
                           >
                             Delete
                           </button>
@@ -543,6 +629,56 @@ function App() {
                   onChange={(e) => setForm((current) => ({ ...current, healthCheckUrl: e.target.value }))}
                 />
               </label>
+              <label>
+                Startup Timeout (seconds)
+                <input
+                  value={form.startupTimeoutSeconds}
+                  placeholder="30"
+                  onChange={(e) => setForm((current) => ({ ...current, startupTimeoutSeconds: e.target.value }))}
+                />
+              </label>
+              <div className="env-editor">
+                <p className="env-editor-title">Environment Variables</p>
+                <div className="env-add-row">
+                  <input
+                    value={newEnvKey}
+                    placeholder="Key (example: JWT_SECRET)"
+                    onChange={(e) => setNewEnvKey(e.target.value)}
+                  />
+                  <input
+                    value={newEnvValue}
+                    placeholder="Value"
+                    onChange={(e) => setNewEnvValue(e.target.value)}
+                  />
+                  <button type="button" onClick={addEnvVar}>
+                    Add
+                  </button>
+                </div>
+                <div className="env-list">
+                  {Object.entries(form.env)
+                    .filter(([key]) => key !== healthCheckUrlEnvKey && key !== startupTimeoutEnvKey)
+                    .map(([key, value]) => (
+                      <div key={key} className="env-row">
+                        <input value={key} readOnly />
+                        <input
+                          value={value}
+                          onChange={(e) =>
+                            setForm((current) => ({
+                              ...current,
+                              env: {
+                                ...current.env,
+                                [key]: e.target.value,
+                              },
+                            }))
+                          }
+                        />
+                        <button type="button" className="danger" onClick={() => removeEnvVar(key)}>
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                </div>
+              </div>
               <div className="actions">
                 <button type="submit" disabled={isSaving}>
                   {isSaving ? 'Saving...' : 'Save'}
@@ -555,6 +691,8 @@ function App() {
           </div>
         </div>
       ) : null}
+
+      {notice ? <div className="toast notice-toast">{notice}</div> : null}
     </div>
   )
 }

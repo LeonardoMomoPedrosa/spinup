@@ -32,8 +32,10 @@ Scripts are available in `scripts/windows` and should be run from an elevated Po
 
 - Install: `.\scripts\windows\install-service.ps1`
 - Restart: `.\scripts\windows\restart-service.ps1`
-- Update: `.\scripts\windows\update-service.ps1`
 - Uninstall: `.\scripts\windows\uninstall-service.ps1`
+
+Canonical update command (elevated PowerShell):
+- `.\scripts\windows\update-spinup.ps1`
 
 When installed via script, the Windows Service serves both:
 - frontend UI at `/`

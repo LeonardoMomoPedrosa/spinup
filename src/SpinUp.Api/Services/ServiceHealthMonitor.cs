@@ -4,7 +4,7 @@ public sealed class ServiceHealthMonitor(
     IServiceRuntimeManager runtimeManager,
     ILogger<ServiceHealthMonitor> logger) : BackgroundService
 {
-    private static readonly TimeSpan CheckInterval = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan CheckInterval = TimeSpan.FromSeconds(15);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {

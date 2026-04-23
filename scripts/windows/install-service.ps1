@@ -49,14 +49,34 @@ Write-Host "Building frontend..."
 Push-Location "$frontendPath"
 try {
     npm install
+    if ($LASTEXITCODE -ne 0) {
+        throw "npm install failed with exit code $LASTEXITCODE"
+    }
+
     npm run build
+    if ($LASTEXITCODE -ne 0) {
+        throw "npm run build failed with exit code $LASTEXITCODE"
+    }
 }
 finally {
     Pop-Location
 }
 
+Write-Host "Ensuring service does not already exist..."
+$existing = Get-Service -Name "$ServiceName" -ErrorAction SilentlyContinue
+if ($existing) {
+    if ($existing.Status -ne "Stopped") {
+        Stop-Service -Name "$ServiceName" -Force
+    }
+    Invoke-Sc -Arguments @("delete", "$ServiceName")
+    Start-Sleep -Seconds 1
+}
+
 Write-Host "Publishing SpinUp.Api..."
 dotnet publish "$projectPath" -c "$Configuration" -o "$publishDir"
+if ($LASTEXITCODE -ne 0) {
+    throw "dotnet publish failed with exit code $LASTEXITCODE"
+}
 
 if (-not (Test-Path "$exePath")) {
     throw "Published exe not found at $exePath"
@@ -77,16 +97,6 @@ if (-not (Test-Path "$targetDbPath")) {
 
 if (-not (Test-Path "$targetDbPath")) {
     Write-Host "No existing database found; service will initialize a new database at $targetDbPath"
-}
-
-Write-Host "Ensuring service does not already exist..."
-$existing = Get-Service -Name "$ServiceName" -ErrorAction SilentlyContinue
-if ($existing) {
-    if ($existing.Status -ne "Stopped") {
-        Stop-Service -Name "$ServiceName" -Force
-    }
-    Invoke-Sc -Arguments @("delete", "$ServiceName")
-    Start-Sleep -Seconds 1
 }
 
 $serviceCommand = "`"$exePath`" --urls $Url"

@@ -190,13 +190,15 @@ servicesGroup.MapPost("/stop-all", async (IServiceRuntimeManager runtime, Cancel
     return Results.Ok(result);
 });
 
-servicesGroup.MapGet("/{id:guid}/runtime", (Guid id, IServiceRuntimeManager runtime) =>
+servicesGroup.MapGet("/{id:guid}/runtime", async (Guid id, IServiceRuntimeManager runtime, CancellationToken cancellationToken) =>
 {
+    await runtime.CheckHealthAsync(cancellationToken);
     return Results.Ok(runtime.GetRuntime(id));
 });
 
-servicesGroup.MapGet("/runtime", (IServiceRuntimeManager runtime) =>
+servicesGroup.MapGet("/runtime", async (IServiceRuntimeManager runtime, CancellationToken cancellationToken) =>
 {
+    await runtime.CheckHealthAsync(cancellationToken);
     return Results.Ok(runtime.GetAllRuntime());
 });
 
@@ -204,6 +206,12 @@ servicesGroup.MapGet("/{id:guid}/logs", (Guid id, IServiceLogStore logs, int? ta
 {
     var entries = logs.GetRecent(id, take ?? 200, since);
     return Results.Ok(new ServiceLogListResponse(id, entries));
+});
+
+servicesGroup.MapDelete("/{id:guid}/logs", (Guid id, IServiceLogStore logs) =>
+{
+    logs.Clear(id);
+    return Results.NoContent();
 });
 
 app.MapGet("/api/stream", async (HttpContext context, IEventStreamBroadcaster broadcaster, CancellationToken cancellationToken) =>

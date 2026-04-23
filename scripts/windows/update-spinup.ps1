@@ -6,8 +6,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = (Resolve-Path "$PSScriptRoot\..\..").Path
-$installScript = Join-Path $repoRoot "scripts\windows\install-service.ps1"
+$installScript = Join-Path $PSScriptRoot "install-service.ps1"
 
-Write-Host "Updating $ServiceName by republishing and reinstalling..."
+if (-not (Test-Path $installScript)) {
+    throw "Install script not found at $installScript"
+}
+
 powershell -ExecutionPolicy Bypass -File "$installScript" -ServiceName "$ServiceName" -Url "$Url" -Configuration "$Configuration"

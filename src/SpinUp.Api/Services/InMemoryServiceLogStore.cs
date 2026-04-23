@@ -25,6 +25,11 @@ public class InMemoryServiceLogStore(LogBufferOptions options) : IServiceLogStor
         return buffer.GetRecent(cappedTake, since);
     }
 
+    public void Clear(Guid serviceId)
+    {
+        _buffers.TryRemove(serviceId, out _);
+    }
+
     private sealed class ServiceLogBuffer(int max)
     {
         private readonly int _max = max;

@@ -95,7 +95,7 @@ Epic 5 stories from `docs/product-spec.md`:
   - `install-service.ps1`
   - `uninstall-service.ps1`
   - `restart-service.ps1`
-  - `update-service.ps1` (optional but recommended)
+  - `update-spinup.ps1` (in `scripts/windows`, recommended)
 - Script responsibilities:
   - publish/build binaries
   - create service
