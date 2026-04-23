@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SpinUp.Api/SpinUp.Api.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SpinUp.Api.Tests/SpinUp.Api.Tests.csproj" />
+  </Folder>
+</Solution>
