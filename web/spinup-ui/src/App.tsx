@@ -195,6 +195,8 @@ function App() {
       const status = normalizeRuntimeStatus(getProp<RuntimeStatus | number>(payload, 'status', 'Status'))
       const message = getProp<string | null>(payload, 'message', 'Message') ?? null
       const exitCode = getProp<number | null>(payload, 'exitCode', 'ExitCode') ?? null
+      const nextPid = getProp<number | null>(payload, 'pid', 'Pid')
+      const nextStartedAt = getProp<string | null>(payload, 'startedAt', 'StartedAt')
 
       setRuntimeMap((current) => {
         const existing = current[serviceId]
@@ -203,8 +205,8 @@ function App() {
           [serviceId]: {
             serviceId,
             status,
-            pid: existing?.pid ?? null,
-            startedAt: existing?.startedAt ?? null,
+            pid: nextPid !== undefined ? nextPid : (existing?.pid ?? null),
+            startedAt: nextStartedAt !== undefined ? nextStartedAt : (existing?.startedAt ?? null),
             lastExitCode: exitCode ?? existing?.lastExitCode ?? null,
             lastError: message ?? existing?.lastError ?? null,
           },

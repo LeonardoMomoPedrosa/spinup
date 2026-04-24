@@ -27,6 +27,11 @@ public class ServiceRuntimeManager(
     private readonly ConcurrentDictionary<Guid, bool> _stopRequested = new();
     private readonly ConcurrentDictionary<Guid, Uri> _healthCheckUrls = new();
     private readonly ConcurrentDictionary<Guid, int> _startupTimeoutSeconds = new();
+    /// <summary>
+    /// When user stops a service that SpinUp did not start (health-only UP, no managed PID),
+    /// we keep status Down until Start succeeds, so health polling does not immediately flip back to Up.
+    /// </summary>
+    private readonly ConcurrentDictionary<Guid, byte> _externalHealthSuppressed = new();
 
     public async Task<RuntimeActionResponse> StartAsync(Guid serviceId, CancellationToken cancellationToken = default)
     {
@@ -49,19 +54,29 @@ public class ServiceRuntimeManager(
             {
                 var message = $"Service path '{service.Path}' does not exist.";
                 UpdateRuntime(serviceId, RuntimeStatus.Error, null, null, null, message);
-                PublishRuntimeEvent(serviceId, RuntimeStatus.Error, message, null);
+                PublishRuntimeSnapshot(serviceId);
                 return Fail(serviceId, "invalid_path", message);
             }
 
-            UpdateRuntime(serviceId, RuntimeStatus.Starting, null, null, null, null);
-            PublishRuntimeEvent(serviceId, RuntimeStatus.Starting, null, null);
-            var healthCheckConfigError = ConfigureHealthCheck(service);
-            if (healthCheckConfigError is not null)
+            var healthCheckConfigErrorForProbe = ConfigureHealthCheck(service);
+            if (healthCheckConfigErrorForProbe is not null)
             {
-                UpdateRuntime(serviceId, RuntimeStatus.Error, null, null, null, healthCheckConfigError);
-                PublishRuntimeEvent(serviceId, RuntimeStatus.Error, healthCheckConfigError, null);
-                return Fail(serviceId, "invalid_healthcheck", healthCheckConfigError);
+                UpdateRuntime(serviceId, RuntimeStatus.Error, null, null, null, healthCheckConfigErrorForProbe);
+                PublishRuntimeSnapshot(serviceId);
+                return Fail(serviceId, "invalid_healthcheck", healthCheckConfigErrorForProbe);
             }
+
+            if (_healthCheckUrls.TryGetValue(serviceId, out var probeUri)
+                && await IsHealthEndpointSuccessAsync(probeUri, cancellationToken))
+            {
+                return Fail(
+                    serviceId,
+                    "already_running",
+                    $"Service '{service.Name}' health check already succeeds (another process may own this port). Stop that process, then start from SpinUp.");
+            }
+
+            UpdateRuntime(serviceId, RuntimeStatus.Starting, null, null, null, null);
+            PublishRuntimeSnapshot(serviceId);
             _startupTimeoutSeconds[serviceId] = ResolveStartupTimeoutSeconds(service);
 
             var (fileName, baseArgs) = ParseCommand(service.Command);
@@ -108,13 +123,15 @@ public class ServiceRuntimeManager(
                 return Fail(serviceId, "start_failed", ex.Message);
             }
 
+            _externalHealthSuppressed.TryRemove(serviceId, out _);
+
             var startedAt = DateTimeOffset.UtcNow;
             _processes[serviceId] = new ManagedProcess(process, startedAt);
             _stopRequested[serviceId] = false;
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             var runtime = UpdateRuntime(serviceId, RuntimeStatus.Starting, process.Id, startedAt, null, null);
-            PublishRuntimeEvent(serviceId, RuntimeStatus.Starting, null, null);
+            PublishRuntimeSnapshot(serviceId);
             _ = PromoteToUpWhenReadyAsync(serviceId, process, CancellationToken.None);
             return new RuntimeActionResponse(true, runtime);
         }
@@ -138,13 +155,24 @@ public class ServiceRuntimeManager(
 
             if (!_processes.TryGetValue(serviceId, out var managed) || managed.Process.HasExited)
             {
-                var downState = UpdateRuntime(serviceId, RuntimeStatus.Down, null, null, null, null);
-                return new RuntimeActionResponse(true, downState);
+                var runtimeNow = GetRuntime(serviceId);
+                if (runtimeNow.Status is RuntimeStatus.Up or RuntimeStatus.Starting)
+                {
+                    _externalHealthSuppressed[serviceId] = 1;
+                    _ = ConfigureHealthCheck(service);
+                    _startupTimeoutSeconds[serviceId] = ResolveStartupTimeoutSeconds(service);
+                    var suppressedDown = UpdateRuntime(serviceId, RuntimeStatus.Down, null, null, null, null);
+                    PublishRuntimeSnapshot(serviceId);
+                    return new RuntimeActionResponse(true, suppressedDown);
+                }
+
+                var idleDown = UpdateRuntime(serviceId, RuntimeStatus.Down, null, null, null, null);
+                return new RuntimeActionResponse(true, idleDown);
             }
 
             _stopRequested[serviceId] = true;
             UpdateRuntime(serviceId, RuntimeStatus.Stopping, managed.Process.Id, managed.StartedAt, null, null);
-            PublishRuntimeEvent(serviceId, RuntimeStatus.Stopping, null, null);
+            PublishRuntimeSnapshot(serviceId);
 
             try
             {
@@ -177,8 +205,9 @@ public class ServiceRuntimeManager(
             _processes.TryRemove(serviceId, out _);
             _healthCheckUrls.TryRemove(serviceId, out _);
             _startupTimeoutSeconds.TryRemove(serviceId, out _);
+            _externalHealthSuppressed.TryRemove(serviceId, out _);
             var runtime = UpdateRuntime(serviceId, RuntimeStatus.Down, null, null, exitCode, null);
-            PublishRuntimeEvent(serviceId, RuntimeStatus.Down, null, exitCode);
+            PublishRuntimeSnapshot(serviceId);
             managed.Process.Dispose();
             return new RuntimeActionResponse(true, runtime);
         }
@@ -241,6 +270,11 @@ public class ServiceRuntimeManager(
 
         foreach (var (serviceId, managed) in _processes.ToArray())
         {
+            if (managed.Process.HasExited)
+            {
+                continue;
+            }
+
             if (!_healthCheckUrls.TryGetValue(serviceId, out var healthCheckUri))
             {
                 continue;
@@ -251,7 +285,8 @@ public class ServiceRuntimeManager(
 
         foreach (var (serviceId, healthCheckUri) in _healthCheckUrls.ToArray())
         {
-            if (_processes.TryGetValue(serviceId, out var managed) && !managed.Process.HasExited)
+            // Still tracked (even if exit cleanup is pending) — never treat as "external only" here.
+            if (_processes.ContainsKey(serviceId))
             {
                 continue;
             }
@@ -268,17 +303,18 @@ public class ServiceRuntimeManager(
         _processes.TryRemove(serviceId, out _);
         _healthCheckUrls.TryRemove(serviceId, out _);
         _startupTimeoutSeconds.TryRemove(serviceId, out _);
+        _externalHealthSuppressed.TryRemove(serviceId, out _);
 
         if (stopRequested || exitCode == 0)
         {
             UpdateRuntime(serviceId, RuntimeStatus.Down, null, null, exitCode, null);
-            PublishRuntimeEvent(serviceId, RuntimeStatus.Down, null, exitCode);
+            PublishRuntimeSnapshot(serviceId);
         }
         else
         {
             var message = $"Process exited unexpectedly with code {exitCode}.";
             UpdateRuntime(serviceId, RuntimeStatus.Error, null, null, exitCode, message);
-            PublishRuntimeEvent(serviceId, RuntimeStatus.Error, message, exitCode);
+            PublishRuntimeSnapshot(serviceId);
         }
 
         _stopRequested[serviceId] = false;
@@ -352,6 +388,11 @@ public class ServiceRuntimeManager(
         Uri healthCheckUri,
         CancellationToken cancellationToken)
     {
+        if (managed.Process.HasExited)
+        {
+            return;
+        }
+
         var current = GetRuntime(serviceId);
         RuntimeStatus nextStatus;
         string? nextError;
@@ -388,11 +429,7 @@ public class ServiceRuntimeManager(
             managed.StartedAt,
             current.LastExitCode,
             nextError);
-        PublishRuntimeEvent(
-            serviceId,
-            nextStatus,
-            nextError,
-            current.LastExitCode);
+        PublishRuntimeSnapshot(serviceId);
     }
 
     private async Task CheckExternalServiceHealthAsync(
@@ -401,6 +438,17 @@ public class ServiceRuntimeManager(
         CancellationToken cancellationToken)
     {
         var current = GetRuntime(serviceId);
+        if (_externalHealthSuppressed.ContainsKey(serviceId))
+        {
+            if (current.Status is not RuntimeStatus.Down)
+            {
+                UpdateRuntime(serviceId, RuntimeStatus.Down, null, null, current.LastExitCode, null);
+                PublishRuntimeSnapshot(serviceId);
+            }
+
+            return;
+        }
+
         RuntimeStatus nextStatus;
         string? nextError;
 
@@ -438,11 +486,7 @@ public class ServiceRuntimeManager(
             current.StartedAt,
             current.LastExitCode,
             nextError);
-        PublishRuntimeEvent(
-            serviceId,
-            nextStatus,
-            nextError,
-            current.LastExitCode);
+        PublishRuntimeSnapshot(serviceId);
     }
 
     private async Task PromoteToUpWhenReadyAsync(Guid serviceId, Process process, CancellationToken cancellationToken)
@@ -483,7 +527,7 @@ public class ServiceRuntimeManager(
                 {
                     var message = $"Startup health check did not become ready within {startupTimeoutSeconds} seconds.";
                     UpdateRuntime(serviceId, RuntimeStatus.Error, process.Id, GetRuntime(serviceId).StartedAt, null, message);
-                    PublishRuntimeEvent(serviceId, RuntimeStatus.Error, message, null);
+                    PublishRuntimeSnapshot(serviceId);
                 }
 
                 return;
@@ -510,7 +554,7 @@ public class ServiceRuntimeManager(
         }
 
         UpdateRuntime(serviceId, RuntimeStatus.Up, process.Id, current.StartedAt, current.LastExitCode, null);
-        PublishRuntimeEvent(serviceId, RuntimeStatus.Up, null, current.LastExitCode);
+        PublishRuntimeSnapshot(serviceId);
     }
 
     private ServiceRuntimeResponse UpdateRuntime(
@@ -537,13 +581,16 @@ public class ServiceRuntimeManager(
         _ = broadcaster.PublishAsync(new StreamEvent("log", entry.Timestamp, serviceId, entry));
     }
 
-    private void PublishRuntimeEvent(Guid serviceId, RuntimeStatus status, string? message, int? exitCode)
+    private void PublishRuntimeSnapshot(Guid serviceId)
     {
+        var r = GetRuntime(serviceId);
         var payload = new
         {
-            status,
-            message,
-            exitCode
+            status = r.Status,
+            message = r.LastError,
+            exitCode = r.LastExitCode,
+            pid = r.Pid,
+            startedAt = r.StartedAt
         };
         _ = broadcaster.PublishAsync(new StreamEvent("runtime", DateTimeOffset.UtcNow, serviceId, payload));
     }
@@ -613,6 +660,19 @@ public class ServiceRuntimeManager(
         foreach (var service in definitions)
         {
             _ = ConfigureHealthCheck(service);
+        }
+    }
+
+    private static async Task<bool> IsHealthEndpointSuccessAsync(Uri healthCheckUri, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await HealthClient.GetAsync(healthCheckUri, cancellationToken);
+            return response.IsSuccessStatusCode;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return false;
         }
     }
 
