@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using SpinUp.Api.Contracts;
 using SpinUp.Api.Data;
@@ -93,7 +94,9 @@ public class ServiceRuntimeManager(
                     WorkingDirectory = service.Path,
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
-                    RedirectStandardError = true
+                    RedirectStandardError = true,
+                    StandardOutputEncoding = new UTF8Encoding(false),
+                    StandardErrorEncoding = new UTF8Encoding(false)
                 },
                 EnableRaisingEvents = true
             };

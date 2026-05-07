@@ -266,8 +266,10 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [notice])
 
-  async function loadAll() {
-    setIsLoading(true)
+  async function loadAll(options?: { silent?: boolean }) {
+    if (!options?.silent) {
+      setIsLoading(true)
+    }
     setError(null)
     try {
       const [serviceList, runtimeList] = await Promise.all([
@@ -287,7 +289,9 @@ function App() {
     } catch (loadError) {
       setError((loadError as Error).message)
     } finally {
-      setIsLoading(false)
+      if (!options?.silent) {
+        setIsLoading(false)
+      }
     }
   }
 
@@ -430,7 +434,8 @@ function App() {
         setNotice(`Service ${form.name} created`)
       }
       setShowForm(false)
-      await loadAll()
+      // Refresh service cards in the background so the modal is immediately usable again.
+      void loadAll({ silent: true })
     } catch (saveError) {
       setError((saveError as Error).message)
     } finally {
@@ -450,7 +455,7 @@ function App() {
       if (selectedServiceId === item.id) {
         setSelectedServiceId(null)
       }
-      await loadAll()
+      await loadAll({ silent: true })
     } catch (removeError) {
       setError((removeError as Error).message)
     }
